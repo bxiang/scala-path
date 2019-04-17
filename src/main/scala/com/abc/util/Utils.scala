@@ -28,4 +28,17 @@ object Utils {
     }
   }
 
+  import cats.Monoid
+  import cats.implicits._
+
+  def optionMonoid[T: Monoid] = new Monoid[Option[T]] {
+    override def empty: Option[T] = None
+
+    override def combine(a: Option[T], b: Option[T]) = for {
+      t1 <- a
+      t2 <- b
+    } yield t1.combine(t2)
+
+  }
+
 }
