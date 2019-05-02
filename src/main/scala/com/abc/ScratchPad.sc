@@ -18,7 +18,25 @@
 
 //import cats.data._
 
-import com.abc.util.StringUtil._
+//import com.abc.util.StringUtil._
 
-val x12 = "1352".toIntOpt
+//val x12 = "1352".toIntOpt
+//
 
+val s = "abcd"
+
+def doStuff(input: List[Char]): List[List[Char]] = {
+  input match {
+    case Nil => List.empty
+    case x :: Nil => List(List(x.toUpper), List(x.toLower))
+    case x :: xs =>
+      for {
+        s <- doStuff(xs)
+        c <- List(x.toUpper, x.toLower)
+      } yield c :: s
+  }
+}
+
+def findString(input: String): List[String] = doStuff(input.toList).map(_.mkString)
+
+findString(s)
