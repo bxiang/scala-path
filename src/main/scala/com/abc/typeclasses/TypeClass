@@ -1,0 +1,22 @@
+package com.abc.typeclasses
+
+object TypeClass {
+
+//  def add[A](x: A, y: A): A = x + y
+
+  trait Addable[A] {
+    def plus(x: A, y: A): A
+  }
+
+  implicit class AddableOps[A](lhs: A)(implicit ev: Addable[A]) {
+    def +(rhs: A): A = ev.plus(lhs, rhs)
+  }
+
+  def add[A: Addable](x: A, y: A): A = x + y
+
+  implicit object IntIsAddable extends Addable[Int] {
+    def plus(x: Int, y: Int): Int = x + y
+  }
+
+  val total = add(5, 4)
+}
