@@ -9,11 +9,15 @@ object StringUtil {
 
     import scala.util.Try
 
+    new File
+
     lazy val dateReportedDTF: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd-HH.mm.ss.SSSSSS")
 
     def toIntOpt = Try(s.toInt) toOption
 
     def reportedDate = LocalDateTime.parse(s, dateReportedDTF).toLocalDate
+
+
 
   }
 
