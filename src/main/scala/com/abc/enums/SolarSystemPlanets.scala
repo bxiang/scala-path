@@ -6,7 +6,7 @@ object SolarSystemPlanets {
                                 val orderFromSun: Int,
                                 val name: String,
                                 val mass: Kilogram,
-                                val radius: Meter) extends Ordered[Planet] {
+                                val radius: Meter) extends Ordered[Planet] with Product with Serializable {
 
     def compare(that: Planet) = this.orderFromSun - that.orderFromSun
 
@@ -15,6 +15,20 @@ object SolarSystemPlanets {
     def surfaceWeight(otherMass: Kilogram) = otherMass * surfaceGravity
 
     override def toString = name
+  }
+
+  object Planet {
+    def lookup(name: String): Planet = name match {
+      case MERCURY.name => MERCURY
+      case VENUS.name => VENUS
+      case EARTH.name => EARTH
+      case MARS.name => MARS
+      case JUPITER.name => JUPITER
+      case SATURN.name => SATURN
+      case URANUS.name => URANUS
+      case NEPTUNE.name => NEPTUNE
+      case _ => throw new RuntimeException(s"Unknown planet name: $name")
+    }
   }
 
   case object MERCURY extends Planet(1, "Mercury", 3.303e+23, 2.4397e6)
