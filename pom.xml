@@ -35,6 +35,11 @@
             <version>${scala.version}</version>
         </dependency>
         <dependency>
+            <groupId>dev.zio</groupId>
+            <artifactId>zio_${scala.compat.version}</artifactId>
+            <version>1.0.1</version>
+        </dependency>
+        <dependency>
             <groupId>org.scalaz</groupId>
             <artifactId>scalaz-zio_${scala.compat.version}</artifactId>
             <version>1.0-RC4</version>
