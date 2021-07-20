@@ -23,7 +23,7 @@
         <scala.compat.version>2.12</scala.compat.version>
         <cats-core.version>1.6.0</cats-core.version>
         <cats-effect.version>1.3.0</cats-effect.version>
-        <log4j.version>2.11.1</log4j.version>
+        <log4j.version>2.13.3</log4j.version>
         <spec2.version>4.2.0</spec2.version>
         <scalacheck.version>1.13.5</scalacheck.version>
     </properties>
@@ -78,7 +78,7 @@
         <dependency>
             <groupId>junit</groupId>
             <artifactId>junit</artifactId>
-            <version>4.12</version>
+            <version>4.13.1</version>
             <scope>test</scope>
         </dependency>
         <dependency>
