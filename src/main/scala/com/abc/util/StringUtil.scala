@@ -3,9 +3,9 @@ package com.abc.util
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
-object StringUtil {
+object StringUtil extends App {
 
-  implicit class EnrichedString(val s: String) {
+  implicit class EnrichedString(s: String) {
 
     import scala.util.Try
 
@@ -15,8 +15,9 @@ object StringUtil {
 
     def reportedDate = LocalDateTime.parse(s, dateReportedDTF).toLocalDate
 
-
-
   }
 
+  val x = "12".toIntOpt
+
+  println(x)
 }
