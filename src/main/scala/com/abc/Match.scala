@@ -1,11 +1,14 @@
 package com.abc
 
+import scala.util.Try
+
 object Match extends App {
 
   val xs = 3 :: 6 :: 12 :: 24 :: Nil
 
   val result = xs match {
 //    case x :: xs   match head
+    case first :: (list :+ last) => s"first=$first, last=$last, and the rest is: $list"
     case List(_*) :+ 24 => "end with 24" // match the last element
     case List(a, b, _*) => a * b // match first 2 elements
     case _ => 0
@@ -45,4 +48,5 @@ object Match extends App {
   val res = findString(s)
   println(res)
 
+  val attempt: Try[Int] = Try(throw new NullPointerException)
 }

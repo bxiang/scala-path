@@ -24,8 +24,7 @@ package object typeclasses {
         def speak(implicit behavesLikeHumanInstance: BehavesLikeHuman[A]): Unit = {
             behavesLikeHumanInstance.speak(value)
         }
-    }
-  }
+    }}
 
   object HumanLikeApp extends App {
 
