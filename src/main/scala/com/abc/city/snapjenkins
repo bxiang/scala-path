@@ -1,0 +1,307 @@
+pipeline {
+  //for blackduck scan, we need to use jdk11 agent
+  agent { label 'jdk11' }
+  options { timeout(time: 120, unit: 'MINUTES') }
+
+  environment {
+    LS_RELEASE_BRANCH_REGEX = '(main)'
+
+    // ECS cluster names
+    ECS_CLUSTER_DEV = "namicggtd10d"
+    ECS_CLUSTER_UAT_EMEA = "euricgfdc10u"
+    ECS_CLUSTER_UAT_NAM = "namicgrut10u"
+
+    // Reflexion notifications
+    REFLEXION_BUILD_TO_JIRA = 'false'
+    REFLEXION_BUILD_TO_EMAIL = 'true'
+    REFLEXION_EMAIL_BUILD_TYPE = 'allBuilds'
+    REFLEXION_EMAIL_TO = 'dl.icg.uk.snap.dev@imceu.eu.ssmb.com'
+    REFLEXION_CHANGE_LIST_LOCATION = "build/deploy/changes.log"
+  }
+
+  stages {
+    stage('Initialise') {
+      steps {
+        stepInitialise()
+
+        script {
+          env.DEPLOY_UAT = "${env.LS_RELEASE_BUILD}"
+		  env.DEPLOY_DEV  =  env.LS_GIT_COMMIT_MESSAGE.startsWith("DEV").toString()
+		  env.DEPLOY_DEMO =  env.LS_GIT_COMMIT_MESSAGE.startsWith("DEMO").toString()
+        }
+      }
+    }
+
+    stage("SNAP Build") {
+      parallel {
+        stage('Crackle') {
+          agent { label 'jdk11' }
+          stages {
+            stage("Set up SBT") {
+              steps {
+                script {
+                  withCredentials([usernamePassword(credentialsId: 'citi-ear', usernameVariable: 'LS_ARTIFACTORY_CREDS_USR', passwordVariable: 'LS_ARTIFACTORY_CREDS_PSW')]) {
+                    def creds = "credentials += Credentials(\"Artifactory Realm\", \"www.artifactrepository.citigroup.net\", \"${LS_ARTIFACTORY_CREDS_USR}\", \"${LS_ARTIFACTORY_CREDS_PSW}\")"
+                    def creds_dot_file = "realm=Artifactory Realm\nhost=www.artifactrepository.citigroup.net\nuser=${LS_ARTIFACTORY_CREDS_USR}\npassword=${LS_ARTIFACTORY_CREDS_PSW}\n"
+                    writeFile file: "${HOME}/.sbt/1.0/credentials.sbt", text: creds
+                    writeFile file: "${HOME}/.sbt/1.0/plugins/credentials.sbt", text: creds
+                    writeFile file: "${HOME}/.sbt/.credentials", text: creds_dot_file
+                  }
+                  writeFile file: "${HOME}/.sbt/build.sbt", text: "transitiveClassifiers in Global := Seq.empty"
+                  writeFile file: "${HOME}/.sbt/1.0/build.sbt", text: "transitiveClassifiers in Global := Seq.empty"
+                  writeFile file: "${HOME}/.sbt/1.0/plugins/build.sbt", text: "transitiveClassifiers in Global := Seq.empty"
+
+                  def sbt_repositories = readFile "${env.WORKSPACE}/tools/sbt_repositories"
+                  writeFile file: "${HOME}/.sbt/repositories", text: sbt_repositories
+                  env.SBT_JAR_PATH = "${env.WORKSPACE}/project/sbt-launch.jar"
+                  env.SBT_OPTS = "-Dsbt.override.build.repos=true -Dsbt.coursier=false -Dbuild.number=${env.LS_BUILD_NUMBER} -Xss8m -Xmx3g -XX:+UseContainerSupport"
+                  env.SBT_CREDENTIALS = "${env.HOME}/.sbt/.credentials"
+                }
+              }
+            }
+            stage('Scala Build') {
+              steps {
+                sh "$JAVA_HOME/bin/java ${env.SBT_OPTS} -jar ${env.SBT_JAR_PATH} clean compile test:compile it:compile"
+              }
+            }
+            stage('Scala Test') {
+              steps {
+                sh "$JAVA_HOME/bin/java ${env.SBT_OPTS} -jar ${env.SBT_JAR_PATH} test"
+              }
+            }
+            stage('Crackle Package') {
+              steps {
+                sh "$JAVA_HOME/bin/java ${env.SBT_OPTS} -jar ${env.SBT_JAR_PATH} 'show crackle/stage'"
+                stash includes: 'crackle/target/universal/stage/**', name: 'crackle'
+                stash includes: 'crackle/target/**', name: 'crackle_bd'
+              }
+            }
+          }
+        }
+
+        stage('Pop') {
+          agent { label 'nodejs12' }
+          stages {
+            stage("Npm configure") {
+              steps {
+                dir('pop/app') {
+                  stepNpmServiceConfigure()
+                }
+              }
+            }
+            stage("Pop Build") {
+              steps {
+                dir('pop/app') {
+                  sh "npm config set timeout 60000"
+				          sh "npm config list"
+                  sh "npm ci"
+                }
+              }
+            }
+            stage("Pop Test") {
+              steps {
+                dir('pop/app') {
+                  sh "npm run test:ci"
+                  sh "npm run lint"
+                }
+              }
+            }
+            stage("Pop Package") {
+              steps {
+                dir('pop/app') {
+                  sh "npm run build"
+                }
+                stash includes: 'pop/app/build/**', name: 'pop'
+              }
+            }
+          }
+        }
+      }
+    }
+
+    stage('Run BlackDuck Scan') {
+      when { expression { return env.LS_GIT_BRANCH ==~ "main" } }
+      steps {
+        unstash 'crackle_bd'
+
+        sh label: 'Delete pop e2e', script: "rm -fr ./pop/e2e-tests"
+        sh label: 'Delete pop smoke test', script: "rm -fr ./pop/ie-smoke-tests"
+        sh label: 'Delete pop selenium', script: "rm -fr ./pop/selenium-vdi-setup"
+        sh label: 'Delete pop dist', script: "rm -fr ./pop/dist"
+        script {
+          Map overrides = [:]
+          overrides["detect.detector.search.depth"] = "4"
+          stepBlackDuckScan(overrides)
+        }
+      }
+    }
+
+    stage('SNAP Docker Staging') {
+      when {
+	    anyOf {
+		  environment name: 'DEPLOY_DEMO', value: "true"
+		  environment name: 'DEPLOY_DEV', value: "true"
+		  environment name: 'DEPLOY_UAT', value: "true"
+		}
+	  }
+      stages {
+        stage('Initialise Staging Directory') {
+          steps {
+            sh label: 'Print current pod name', script: "hostname"
+            sh label: 'Print current directory name', script: "pwd"
+
+            sh label: 'Clear old staging directory, if it exists', script: "rm -fr snap-stage"
+            sh label: 'Create staging directory', script: "mkdir snap-stage"
+          }
+        }
+
+        stage('Staging Application Files') {
+          parallel {
+            stage('Staging Crackle') {
+              steps {
+                dir('snap-stage') {
+                  unstash 'crackle'
+                  sh label: 'Create Crackle staging structure', script: "mkdir -p ./docker/deploy/crackle-${env.LS_BUILD_NUMBER}"
+
+                  sh label: 'Copy Crackle keystore files to staging directory', script: "cp ${WORKSPACE}/crackle/deployed/*.jks ./docker/deploy/"
+                  sh label: 'Copy Crackle application files to staging directory', script: "cp -r ./crackle/target/universal/stage/* ./docker/deploy/crackle-${env.LS_BUILD_NUMBER}/"
+
+                  sh label: 'Clear Crackle assets from unstash location', script: "rm -fr ./crackle"
+                }
+              }
+            }
+
+            stage('Staging Pop') {
+              steps {
+                dir('snap-stage') {
+                  unstash 'pop'
+                  sh label: 'Create Pop staging structure', script: "mkdir -p ./docker/assets"
+
+                  sh label: 'Copy Pop artefacts to staging directory', script: "cp -r ./pop/app/build/* ./docker/assets/"
+                  sh label: 'Clear Pop assets from unstash location', script: "rm -fr ./pop"
+
+                  script {
+                    env.SNAP_VERSIONS = "{\"snap\": \"${env.LS_BUILD_NUMBER}\", \"crackle\": \"${env.LS_BUILD_NUMBER}\", \"pop\": \"${env.LS_BUILD_NUMBER}\", \"revision\": \"${env.LS_BUILD_NUMBER}\", \"git_commit\": \"${env.GIT_COMMIT}\"}".toString()
+                  }
+                  echo "SNAP_VERSIONS=[${env.SNAP_VERSIONS}]"
+                  writeFile file: './docker/assets/version.json', text: env.SNAP_VERSIONS
+                  writeFile file: './docker/assets/LS_BUILD_VERSION.txt', text: env.LS_BUILD_VERSION
+                  sh label: 'Check LS_BUILD_VERSION.txt', script: "cat ./docker/assets/LS_BUILD_VERSION.txt"
+                }
+              }
+            }
+          }
+        }
+
+        stage('Finalise Staging') {
+          steps {
+            dir('snap-stage/docker') {
+              withEnv(["SNAP_VERSION=${env.LS_BUILD_NUMBER}"]) {
+                sh label: 'Create Dockerfile from template', script: "envsubst '\$SNAP_VERSION' < ${WORKSPACE}/Dockerfile.template > ./Dockerfile"
+              }
+
+              script {
+                env.DOCKER_STAGING_DIR_PATH = pwd()
+              }
+              echo "DOCKER_STAGING_DIR_PATH=[${env.DOCKER_STAGING_DIR_PATH}]"
+            }
+          }
+        }
+      }
+    }
+
+    stage('Build Container Image') {
+      when {
+		anyOf {
+          environment name: 'DEPLOY_DEMO', value: "true"
+          environment name: 'DEPLOY_DEV', value: "true"
+		  environment name: 'DEPLOY_UAT', value: "true"
+		}
+	  }
+      steps {
+        stepContainerImageBuild("${env.DOCKER_STAGING_DIR_PATH}")
+      }
+    }
+
+    stage('Build ECS Deployment Image') {
+      when {
+		anyOf {
+          environment name: 'DEPLOY_DEMO', value: "true"
+          environment name: 'DEPLOY_DEV', value: "true"
+		  environment name: 'DEPLOY_UAT', value: "true"
+		}
+	  }
+      steps {
+        stepEcsDeploymentImageBuild()
+      }
+    }
+
+    stage('Publish to uDeploy') {
+      when {
+		anyOf {
+          environment name: 'DEPLOY_DEMO', value: "true"
+          environment name: 'DEPLOY_DEV', value: "true"
+		  environment name: 'DEPLOY_UAT', value: "true"
+		}
+	  }
+      steps {
+        stepEcsUdeployPublish()
+      }
+    }
+
+    stage('ECS Demo Deployment') {
+      when {
+        allOf {
+          environment name: 'DEPLOY_DEMO', value: "true"
+          expression { (env.ECS_CLUSTER_DEV ?: '') != '' }
+        }
+      }
+      steps {
+        stepUdeployRunApplicationProcess("Deploy", "ECS-DEMO-${env.ECS_CLUSTER_DEV}-${env.LS_OPENSHIFT_PROJECT}")
+      }
+    }
+
+    stage('ECS Dev Deployment') {
+      when {
+        allOf {
+          environment name: 'DEPLOY_DEV', value: "true"
+          expression { (env.ECS_CLUSTER_DEV ?: '') != '' }
+        }
+      }
+      steps {
+        stepUdeployRunApplicationProcess("Deploy", "ECS-DEV-${env.ECS_CLUSTER_DEV}-${env.LS_OPENSHIFT_PROJECT}")
+      }
+    }
+
+    stage('ECS UAT Deployment') {
+      when { environment name: 'DEPLOY_UAT', value: "true" }
+      parallel {
+        stage('ECS UAT Deploy - EMEA') {
+          when {
+            expression { (env.ECS_CLUSTER_UAT_EMEA ?: '') != '' }
+          }
+          steps {
+            stepUdeployRunApplicationProcess("Deploy", "ECS-UAT-${env.ECS_CLUSTER_UAT_EMEA}-${env.LS_OPENSHIFT_PROJECT}")
+          }
+        }
+
+        stage('ECS UAT Deploy - NAM') {
+          when {
+            expression { (env.ECS_CLUSTER_UAT_NAM ?: '') != '' }
+          }
+          steps {
+            stepUdeployRunApplicationProcess("Deploy", "ECS-UAT-${env.ECS_CLUSTER_UAT_NAM}-${env.LS_OPENSHIFT_PROJECT}")
+          }
+        }
+      }
+    }
+
+  }
+
+  post {
+    always {
+      stepReflexionNotify()
+      stepFinalise()
+    }
+  }
+}

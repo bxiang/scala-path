@@ -1,0 +1,152 @@
+pipeline {
+  agent any
+  options { timeout(time: 120, unit: 'MINUTES') }
+
+  environment {
+    LS_RELEASE_BRANCH_REGEX = '(master$)'
+
+    // ECS cluster names
+    ECS_CLUSTER_DEV = "namicggtd44d"
+
+    // Reflexion notifications
+    REFLEXION_BUILD_TO_JIRA = 'false'
+    REFLEXION_BUILD_TO_EMAIL = 'true'
+    REFLEXION_EMAIL_BUILD_TYPE = 'allBuilds'
+    REFLEXION_EMAIL_TO = 'dl.icg.uk.snap.dev@imceu.eu.ssmb.com'
+    REFLEXION_CHANGE_LIST_LOCATION = "build/deploy/changes.log"
+  }
+
+  stages {
+    stage('Initialise') {
+      steps {
+        stepInitialise()
+
+        script {
+//           env.DEPLOY_APP = "${env.LS_RELEASE_BUILD}"
+          env.DEPLOY_APP = "true" // testing from feature branch for now
+
+        }
+      }
+    }
+
+    stage('Monitor Build') {
+      agent { label 'jdk11' }
+      stages {
+        stage("Build") {
+          steps {
+            script {
+              withCredentials([usernamePassword(credentialsId: 'citi-ear', usernameVariable: 'LS_ARTIFACTORY_CREDS_USR', passwordVariable: 'LS_ARTIFACTORY_CREDS_PSW')]) {
+                def creds = "credentials += Credentials(\"Artifactory Realm\", \"www.artifactrepository.citigroup.net\", \"${LS_ARTIFACTORY_CREDS_USR}\", \"${LS_ARTIFACTORY_CREDS_PSW}\")"
+                def creds_dot_file = "realm=Artifactory Realm\nhost=www.artifactrepository.citigroup.net\nuser=${LS_ARTIFACTORY_CREDS_USR}\npassword=${LS_ARTIFACTORY_CREDS_PSW}\n"
+                writeFile file: "${HOME}/.sbt/1.0/credentials.sbt", text: creds
+                writeFile file: "${HOME}/.sbt/1.0/plugins/credentials.sbt", text: creds
+                writeFile file: "${HOME}/.sbt/.credentials", text: creds_dot_file
+              }
+
+              writeFile file: "${HOME}/.sbt/build.sbt", text: "transitiveClassifiers in Global := Seq.empty"
+              writeFile file: "${HOME}/.sbt/1.0/build.sbt", text: "transitiveClassifiers in Global := Seq.empty"
+              writeFile file: "${HOME}/.sbt/1.0/plugins/build.sbt", text: "transitiveClassifiers in Global := Seq.empty"
+
+              def sbt_repositories = readFile "${env.WORKSPACE}/tools/sbt_repositories"
+              writeFile file: "${HOME}/.sbt/repositories", text: sbt_repositories
+              env.SBT_JAR_PATH = "${env.WORKSPACE}/sbt-launch.jar"
+              env.SBT_OPTS = "-Dsbt.override.build.repos=true -Dbuild.number=${env.LS_BUILD_NUMBER} -Xss8m -Xmx3g -XX:+UseContainerSupport"
+              env.PATH = "${env.WORKSPACE}/node-v12.17.0-linux-x64/bin:${env.PATH}"
+              env.SBT_CREDENTIALS = "${env.HOME}/.sbt/.credentials"
+              withCredentials([usernameColonPassword(credentialsId: 'citi-ear', variable: 'LS_ARTIFACTORY_CREDS')]) {
+                sh label: 'Download Nodejs', script: "curl -fsSL -u${LS_ARTIFACTORY_CREDS} https://www.artifactrepository.citigroup.net/artifactory/maven-icg-dev/com/citi/906/nodejs/v12.17.0/node-v12.17.0-linux-x64.tar.gz > ${env.WORKSPACE}/node-v12.17.0-linux-x64.tar.gz"
+                sh label: 'Extract Nodejs', script: "cd ${env.WORKSPACE} && tar zxf ${env.WORKSPACE}/node-v12.17.0-linux-x64.tar.gz"
+                sh label: 'Check PATH', script: 'echo Path is: $PATH'
+                sh label: 'Check npm -v', script: 'npm -v'
+              }
+              sh label: 'Check PATH', script: 'echo Path is: $PATH'
+              sh label: 'Check npm -v', script: 'npm -v'
+              stepNpmConfigure()
+              sh "$JAVA_HOME/bin/java ${env.SBT_OPTS} -jar ${env.SBT_JAR_PATH} clean compile testQuick 'show stage'"
+            }
+            stash includes: 'target/universal/stage/**', name: 'monitoring'
+          }
+        }
+      }
+    }
+
+    stage('Monitor Docker Staging') {
+      stages {
+        stage('Initialise Staging Directory') {
+          steps {
+            sh label: 'Print current pod name', script: "hostname"
+            sh label: 'Print current directory name', script: "pwd"
+            sh label: 'List file names', script: "ls -ltr"
+
+            sh label: 'Clear old staging directory, if it exists', script: "rm -fr monitor-stage"
+            sh label: 'Create staging directory', script: "mkdir monitor-stage"
+          }
+        }
+
+        stage('Staging Monitor Files') {
+          parallel {
+            stage('Staging Monitor') {
+              steps {
+                dir('monitor-stage') {
+                  unstash 'monitoring'
+                  sh label: 'Create Monitor staging structure', script: "mkdir -p ./docker/deploy"
+                  sh label: 'Copy Monitor keystore files to staging directory', script: "cp ${env.WORKSPACE}/TEST_cacerts.jks ./docker/"
+                  sh label: 'Copy Monitor application files to staging directory', script: "cp -r target/universal/stage/* ./docker/deploy/"
+                }
+              }
+            }
+          }
+        }
+
+        stage('Finalise Staging') {
+          steps {
+            dir('monitor-stage/docker') {
+              withEnv(["MONITOR_VERSIONS=${env.LS_BUILD_NUMBER}"]) {
+                sh label: 'Create Dockerfile from template', script: "envsubst '\$MONITOR_VERSIONS' < ${env.WORKSPACE}/Dockerfile.template > ./Dockerfile"
+              }
+
+              script {
+                env.DOCKER_STAGING_DIR_PATH = pwd()
+              }
+              echo "DOCKER_STAGING_DIR_PATH=[${env.DOCKER_STAGING_DIR_PATH}]"
+            }
+          }
+        }
+      }
+    }
+
+    stage('Build Container Image') {
+      steps {
+        stepContainerImageBuild("${env.DOCKER_STAGING_DIR_PATH}")
+      }
+    }
+
+    stage('Build ECS Deployment Image') {
+      when { environment name: 'DEPLOY_APP', value: "true" }
+      steps {
+        stepEcsDeploymentImageBuild()
+      }
+    }
+
+    stage('Publish to uDeploy') {
+      when { environment name: 'DEPLOY_APP', value: "true" }
+      steps {
+        stepEcsUdeployPublish()
+      }
+    }
+
+    stage('ECS Monitor Deployment') {
+      when { environment name: 'DEPLOY_APP', value: "true" }
+      steps {
+        stepUdeployRunApplicationProcess("Deploy", "ECS-DEV-${env.ECS_CLUSTER_DEV}-${env.LS_OPENSHIFT_PROJECT}")
+      }
+    }
+  }
+
+  post {
+    always {
+      stepReflexionNotify()
+      stepFinalise()
+    }
+  }
+}

@@ -1,0 +1,41 @@
+package monitoring.snap
+
+import cats.data.NonEmptyList
+import monitoring.TextShortener.RichStringShorten
+import monitoring.jira.SimpleJiraIssue
+import slinky.core.facade.ReactElement
+import slinky.web.html.{a, href, table, target, tbody, td, th, thead, tr}
+import monitoring.snap.Implicits._
+
+object RenderJIRAs {
+  def apply(jiras: NonEmptyList[SimpleJiraIssue]): ReactElement = table(
+    thead(
+      tr(
+        th("JIRA"),
+        th("Summary"),
+        th("Status"),
+        th("Labels"),
+        th("Updated"),
+        th("Assignee"),
+        th("Recent comment")
+      )
+    ),
+    tbody(
+      jiras
+        .filterNot(_.fields.status.name.equalsIgnoreCase("CLOSED"))
+        .map(
+          jira =>
+            tr(
+              th(a(href := jira.webLink, target := "_blank", jira.key)),
+              td(jira.fields.summary),
+              td(jira.fields.status.name),
+              td(jira.fields.labels.mkString(" / ")),
+              td(jira.fields.updated.ago),
+              td(jira.fields.assignee.displayName),
+              td(jira.fields.mostRecentComment.map(_.maybeShorten(56)))
+            )
+        )
+        .toList
+    )
+  )
+}
